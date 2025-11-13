@@ -1,0 +1,28 @@
+# Rust
+/target/
+**/*.rs.bk
+*.pdb
+Cargo.lock
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# OS
+Thumbs.db
+
+# Tauri
+datawise-tauri/src-tauri/target/
+datawise-tauri/dist/
+datawise-tauri/node_modules/
+
+# Test data
+*.csv
+*.parquet
+*.json
+!test_fixtures/**
+

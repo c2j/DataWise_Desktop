@@ -1,0 +1,52 @@
+[workspace]
+members = [
+    "datawise-core",
+    # "datawise-tauri",  # TODO: 使用 create-tauri-app 初始化后再添加
+    "datawise-egui",
+    "datawise-tui",
+]
+resolver = "2"
+
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Data processing
+arrow = "53"
+duckdb = "1.1"
+
+# Error handling
+anyhow = "1"
+thiserror = "1"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Concurrency
+dashmap = "6"
+
+# Path handling
+dunce = "1.0"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+authors = ["DataWise Team"]
+repository = "https://github.com/c2j/DataWise_Desktop"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
+
+[profile.dev]
+opt-level = 0
+debug = true
+
