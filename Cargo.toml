@@ -1,7 +1,7 @@
 [workspace]
 members = [
     "datawise-core",
-    # "datawise-tauri",  # TODO: 使用 create-tauri-app 初始化后再添加
+    "datawise-tauri/src-tauri",
     "datawise-egui",
     "datawise-tui",
 ]
