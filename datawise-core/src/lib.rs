@@ -19,8 +19,8 @@
 //! use datawise_core::{DataWise, Command, CmdType};
 //!
 //! #[tokio::main]
-//! async fn main() {
-//!     let core = DataWise::new();
+//! async fn main() -> anyhow::Result<()> {
+//!     let core = DataWise::new()?;
 //!     let mut rx = core.subscribe();
 //!
 //!     // 发送 SQL 查询命令
@@ -31,38 +31,46 @@
 //!         },
 //!     };
 //!
-//!     core.handle(cmd).await.unwrap();
+//!     core.handle(cmd).await?;
 //!
 //!     // 接收事件
 //!     while let Ok(event) = rx.recv().await {
 //!         println!("Event: {:?}", event);
 //!     }
+//!
+//!     Ok(())
 //! }
 //! ```
 
+pub mod executor;
 pub mod protocol;
 
 pub use protocol::{Command, CmdType, EventKind, FileFmt, UiEvent};
 
 use anyhow::Result;
+use executor::Executor;
+use std::sync::Arc;
 use tokio::sync::broadcast;
 
 /// DataWise 核心引擎
 pub struct DataWise {
     /// 事件广播发送器
     tx: broadcast::Sender<UiEvent>,
+    /// SQL 执行器（使用 Arc 以支持跨线程共享）
+    executor: Arc<Executor>,
 }
 
 impl DataWise {
     /// 创建新的 DataWise 实例
     ///
     /// 初始化 DuckDB 内存数据库和事件广播通道。
-    pub fn new() -> Self {
+    pub fn new() -> Result<Self> {
         let (tx, _) = broadcast::channel(100);
+        let executor = Arc::new(Executor::new()?);
 
-        tracing::info!("DataWise initialized");
+        tracing::info!("DataWise initialized with DuckDB executor");
 
-        Self { tx }
+        Ok(Self { tx, executor })
     }
 
     /// 订阅 UI 事件
@@ -84,33 +92,124 @@ impl DataWise {
             kind: EventKind::Started,
         });
 
-        // TODO: 实现命令处理逻辑
-        match cmd.cmd_type {
+        // 处理命令
+        let result = match cmd.cmd_type {
             CmdType::ExecuteSql { sql } => {
                 tracing::info!("Executing SQL: {}", sql);
-                // TODO: 实现 SQL 执行
+                self.execute_sql(cmd.task_id, &sql).await
             }
             CmdType::ImportFile { path, fmt, table_name: _ } => {
                 tracing::info!("Importing file: {} ({:?})", path, fmt);
                 // TODO: 实现文件导入
+                Ok(())
             }
             CmdType::ExportFile { source: _, path, fmt } => {
                 tracing::info!("Exporting to: {} ({:?})", path, fmt);
                 // TODO: 实现文件导出
+                Ok(())
             }
             CmdType::Cancel { task_id } => {
                 tracing::info!("Cancelling task: {}", task_id);
                 // TODO: 实现任务取消
+                Ok(())
+            }
+        };
+
+        // 发送结果事件
+        if let Err(ref e) = result {
+            let _ = self.tx.send(UiEvent {
+                task_id: cmd.task_id,
+                kind: EventKind::Error(e.to_string()),
+            });
+        }
+
+        result
+    }
+
+    /// 执行 SQL 查询
+    async fn execute_sql(&self, task_id: u64, sql: &str) -> Result<()> {
+        // 直接执行 SQL（DuckDB 操作通常很快，不需要 spawn_blocking）
+        let batches = self.executor.execute(sql)?;
+
+        // 计算结果统计
+        let row_count = batches.iter().map(|b| b.num_rows()).sum();
+        let column_count = batches.first().map(|b| b.num_columns()).unwrap_or(0);
+
+        // 生成预览数据（前 10 行）
+        let preview = self.generate_preview(&batches)?;
+
+        // 发送完成事件
+        let _ = self.tx.send(UiEvent {
+            task_id,
+            kind: EventKind::Finished {
+                row_count,
+                column_count,
+                preview,
+            },
+        });
+
+        Ok(())
+    }
+
+    /// 生成数据预览（JSON 格式）
+    fn generate_preview(&self, batches: &[arrow::record_batch::RecordBatch]) -> Result<String> {
+        let mut preview_rows = Vec::new();
+        let mut total_rows = 0;
+
+        for batch in batches {
+            if total_rows >= 10 {
+                break;
+            }
+
+            let schema = batch.schema();
+            let num_rows = batch.num_rows().min(10 - total_rows);
+
+            for row_idx in 0..num_rows {
+                let mut row_obj = serde_json::Map::new();
+
+                for (col_idx, field) in schema.fields().iter().enumerate() {
+                    let column = batch.column(col_idx);
+                    let value = self.array_value_to_json(column, row_idx);
+                    row_obj.insert(field.name().clone(), value);
+                }
+
+                preview_rows.push(serde_json::Value::Object(row_obj));
+                total_rows += 1;
             }
         }
 
-        Ok(())
+        Ok(serde_json::to_string(&preview_rows)?)
+    }
+
+    /// 将 Arrow Array 的值转换为 JSON
+    fn array_value_to_json(&self, array: &dyn arrow::array::Array, index: usize) -> serde_json::Value {
+        use arrow::array::*;
+        use serde_json::json;
+
+        if array.is_null(index) {
+            return json!(null);
+        }
+
+        // 尝试不同的类型转换
+        if let Some(arr) = array.as_any().downcast_ref::<BooleanArray>() {
+            json!(arr.value(index))
+        } else if let Some(arr) = array.as_any().downcast_ref::<Int32Array>() {
+            json!(arr.value(index))
+        } else if let Some(arr) = array.as_any().downcast_ref::<Int64Array>() {
+            json!(arr.value(index))
+        } else if let Some(arr) = array.as_any().downcast_ref::<Float64Array>() {
+            json!(arr.value(index))
+        } else if let Some(arr) = array.as_any().downcast_ref::<StringArray>() {
+            json!(arr.value(index))
+        } else {
+            json!("<unsupported>")
+        }
     }
 }
 
 impl Default for DataWise {
     fn default() -> Self {
-        Self::new()
+        Self::new().expect("Failed to create default DataWise")
     }
 }
 
@@ -120,7 +219,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_datawise_creation() {
-        let core = DataWise::new();
+        let core = DataWise::new().unwrap();
         let mut rx = core.subscribe();
 
         // 测试事件订阅
@@ -129,13 +228,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_command_handling() {
-        let core = DataWise::new();
+        let core = DataWise::new().unwrap();
         let mut rx = core.subscribe();
 
         let cmd = Command {
             task_id: 1,
             cmd_type: CmdType::ExecuteSql {
-                sql: "SELECT 1".to_string(),
+                sql: "SELECT 1 as num".to_string(),
             },
         };
 
@@ -144,6 +243,78 @@ mod tests {
         // 应该收到 Started 事件
         let event = rx.recv().await.unwrap();
         assert_eq!(event.task_id, 1);
-        matches!(event.kind, EventKind::Started);
+        assert!(matches!(event.kind, EventKind::Started));
+
+        // 应该收到 Finished 事件
+        let event = rx.recv().await.unwrap();
+        assert_eq!(event.task_id, 1);
+        match event.kind {
+            EventKind::Finished {
+                row_count,
+                column_count,
+                ..
+            } => {
+                assert_eq!(row_count, 1);
+                assert_eq!(column_count, 1);
+            }
+            _ => panic!("Expected Finished event"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_sql_execution() {
+        let core = DataWise::new().unwrap();
+        let mut rx = core.subscribe();
+
+        let cmd = Command {
+            task_id: 2,
+            cmd_type: CmdType::ExecuteSql {
+                sql: "SELECT 1 as a, 'hello' as b, 3.14 as c".to_string(),
+            },
+        };
+
+        core.handle(cmd).await.unwrap();
+
+        // 跳过 Started 事件
+        let _ = rx.recv().await.unwrap();
+
+        // 检查 Finished 事件
+        let event = rx.recv().await.unwrap();
+        match event.kind {
+            EventKind::Finished {
+                row_count,
+                column_count,
+                preview,
+            } => {
+                assert_eq!(row_count, 1);
+                assert_eq!(column_count, 3);
+                assert!(preview.contains("hello"));
+            }
+            _ => panic!("Expected Finished event"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_sql_error() {
+        let core = DataWise::new().unwrap();
+        let mut rx = core.subscribe();
+
+        let cmd = Command {
+            task_id: 3,
+            cmd_type: CmdType::ExecuteSql {
+                sql: "SELECT * FROM nonexistent_table".to_string(),
+            },
+        };
+
+        let result = core.handle(cmd).await;
+        assert!(result.is_err());
+
+        // 跳过 Started 事件
+        let _ = rx.recv().await.unwrap();
+
+        // 应该收到 Error 事件
+        let event = rx.recv().await.unwrap();
+        assert_eq!(event.task_id, 3);
+        assert!(matches!(event.kind, EventKind::Error(_)));
     }
 }
