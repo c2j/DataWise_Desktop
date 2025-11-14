@@ -228,12 +228,22 @@ impl DataWise {
             }
         }
 
+        // 查询导入的表以获取行数和列数
+        let count_sql = format!("SELECT COUNT(*) as cnt FROM {}", table_name);
+        let batches = self.executor.execute(&count_sql)?;
+        let row_count = batches.iter().map(|b| b.num_rows()).sum();
+
+        // 获取列数
+        let info_sql = format!("SELECT * FROM {} LIMIT 1", table_name);
+        let info_batches = self.executor.execute(&info_sql)?;
+        let column_count = info_batches.first().map(|b| b.num_columns()).unwrap_or(0);
+
         // 发送完成事件
         let _ = self.tx.send(UiEvent {
             task_id,
             kind: EventKind::Finished {
-                row_count: 0,
-                column_count: 0,
+                row_count,
+                column_count,
                 preview: "{}".to_string(),
             },
         });
