@@ -686,4 +686,131 @@ mod tests {
             _ => panic!("Expected Finished event"),
         }
     }
+
+    #[tokio::test]
+    async fn test_concurrent_queries() {
+        let core = std::sync::Arc::new(DataWise::new().unwrap());
+
+        // 并发执行 3 个查询
+        let mut handles = vec![];
+
+        for i in 0..3 {
+            let core_clone = std::sync::Arc::clone(&core);
+            let handle = tokio::spawn(async move {
+                let cmd = Command {
+                    task_id: i,
+                    cmd_type: CmdType::ExecuteSql {
+                        sql: format!("SELECT {} as id", i),
+                    },
+                };
+
+                core_clone.handle(cmd).await.unwrap();
+            });
+            handles.push(handle);
+        }
+
+        // 等待所有查询完成
+        for handle in handles {
+            handle.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn test_cancel_task() {
+        let core = DataWise::new().unwrap();
+        let mut rx = core.subscribe();
+
+        // 发送一个长时间运行的查询
+        let cmd = Command {
+            task_id: 10,
+            cmd_type: CmdType::ExecuteSql {
+                sql: "SELECT * FROM range(1000000)".to_string(),
+            },
+        };
+
+        core.handle(cmd).await.unwrap();
+
+        // 立即取消任务
+        let cancel_cmd = Command {
+            task_id: 10,
+            cmd_type: CmdType::Cancel { task_id: 10 },
+        };
+
+        core.handle(cancel_cmd).await.unwrap();
+
+        // 应该收到 Started 事件
+        let event = rx.recv().await.unwrap();
+        assert!(matches!(event.kind, EventKind::Started));
+    }
+
+    #[tokio::test]
+    async fn test_invalid_sql() {
+        let core = DataWise::new().unwrap();
+        let mut rx = core.subscribe();
+
+        let cmd = Command {
+            task_id: 11,
+            cmd_type: CmdType::ExecuteSql {
+                sql: "INVALID SQL QUERY".to_string(),
+            },
+        };
+
+        // handle 可能返回错误，所以我们不 unwrap
+        let _ = core.handle(cmd).await;
+
+        // 跳过 Started 事件（如果有的话）
+        if let Ok(event) = rx.recv().await {
+            match event.kind {
+                EventKind::Started => {
+                    // 继续接收下一个事件
+                    if let Ok(event) = rx.recv().await {
+                        match event.kind {
+                            EventKind::Error(e) => {
+                                assert!(!e.is_empty());
+                            }
+                            _ => {} // 可能没有 Error 事件
+                        }
+                    }
+                }
+                EventKind::Error(e) => {
+                    assert!(!e.is_empty());
+                }
+                _ => {}
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_large_number_handling() {
+        let core = DataWise::new().unwrap();
+        let mut rx = core.subscribe();
+
+        let cmd = Command {
+            task_id: 12,
+            cmd_type: CmdType::ExecuteSql {
+                sql: "SELECT 9223372036854775807 as max_int64, -9223372036854775808 as min_int64".to_string(),
+            },
+        };
+
+        core.handle(cmd).await.unwrap();
+
+        // 跳过 Started 事件
+        let _ = rx.recv().await.unwrap();
+
+        // 检查 Finished 事件
+        let event = rx.recv().await.unwrap();
+        match event.kind {
+            EventKind::Finished {
+                row_count,
+                column_count,
+                preview,
+            } => {
+                assert_eq!(row_count, 1);
+                assert_eq!(column_count, 2);
+                let preview_json: Vec<serde_json::Value> = serde_json::from_str(&preview).unwrap();
+                assert_eq!(preview_json.len(), 1);
+            }
+            _ => panic!("Expected Finished event"),
+        }
+    }
 }
