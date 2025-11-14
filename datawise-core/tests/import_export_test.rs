@@ -1,0 +1,116 @@
+use datawise_core::{DataWise, Command, CmdType, FileFmt, EventKind};
+use std::fs;
+use tempfile::TempDir;
+
+#[tokio::test]
+async fn test_csv_import() {
+    // 创建临时目录
+    let temp_dir = TempDir::new().unwrap();
+    let csv_path = temp_dir.path().join("test.csv");
+
+    // 创建测试 CSV 文件
+    let csv_content = "id,name,value\n1,Alice,100\n2,Bob,200\n3,Charlie,300\n";
+    fs::write(&csv_path, csv_content).unwrap();
+
+    // 创建 DataWise 实例
+    let core = DataWise::new().unwrap();
+    let mut rx = core.subscribe();
+
+    // 发送导入命令
+    let cmd = Command {
+        task_id: 1,
+        cmd_type: CmdType::ImportFile {
+            path: csv_path.to_string_lossy().to_string(),
+            fmt: FileFmt::Csv,
+            table_name: Some("test_data".to_string()),
+        },
+    };
+
+    core.handle(cmd).await.unwrap();
+
+    // 验证事件流
+    let mut received_started = false;
+    let mut received_finished = false;
+
+    while let Ok(event) = rx.recv().await {
+        match event.kind {
+            EventKind::Started => {
+                received_started = true;
+            }
+            EventKind::Finished { .. } => {
+                received_finished = true;
+                break;
+            }
+            EventKind::Error(e) => {
+                panic!("Unexpected error: {}", e);
+            }
+            _ => {}
+        }
+    }
+
+    assert!(received_started, "Did not receive Started event");
+    assert!(received_finished, "Did not receive Finished event");
+}
+
+#[tokio::test]
+async fn test_csv_export() {
+    let temp_dir = TempDir::new().unwrap();
+    let export_path = temp_dir.path().join("export.csv");
+
+    // 创建 DataWise 实例
+    let core = DataWise::new().unwrap();
+    let mut rx = core.subscribe();
+
+    // 首先创建一个表
+    let create_cmd = Command {
+        task_id: 1,
+        cmd_type: CmdType::ExecuteSql {
+            sql: "CREATE TABLE test_export AS SELECT 1 as id, 'test' as name".to_string(),
+        },
+    };
+
+    core.handle(create_cmd).await.unwrap();
+
+    // 消费事件
+    while let Ok(event) = rx.recv().await {
+        if let EventKind::Finished { .. } = event.kind {
+            break;
+        }
+    }
+
+    // 重新订阅
+    let mut rx = core.subscribe();
+
+    // 导出表
+    let export_cmd = Command {
+        task_id: 2,
+        cmd_type: CmdType::ExportFile {
+            source: "test_export".to_string(),
+            path: export_path.to_string_lossy().to_string(),
+            fmt: FileFmt::Csv,
+        },
+    };
+
+    core.handle(export_cmd).await.unwrap();
+
+    // 验证事件流
+    let mut received_finished = false;
+
+    while let Ok(event) = rx.recv().await {
+        if let EventKind::Finished { .. } = event.kind {
+            received_finished = true;
+            break;
+        }
+    }
+
+    assert!(received_finished, "Did not receive Finished event");
+
+    // 验证文件存在
+    assert!(export_path.exists(), "Export file not created");
+
+    // 验证文件内容
+    let content = fs::read_to_string(&export_path).unwrap();
+    assert!(content.contains("id"), "CSV header missing");
+    assert!(content.contains("name"), "CSV header missing");
+}
+
