@@ -33,6 +33,86 @@ impl Executor {
         })
     }
 
+    /// 导入 CSV 文件
+    pub fn import_csv(
+        &self,
+        path: &std::path::Path,
+        table_name: &str,
+        _progress: Option<Box<dyn Fn(u64, u64) + Send + Sync>>,
+    ) -> anyhow::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let path_str = path.to_string_lossy();
+
+        let sql = format!(
+            "CREATE TABLE {} AS SELECT * FROM read_csv_auto('{}')",
+            table_name, path_str
+        );
+
+        conn.execute(&sql, []).context("Failed to import CSV")?;
+        tracing::info!("CSV imported to table: {}", table_name);
+        Ok(())
+    }
+
+    /// 导入 Parquet 文件
+    pub fn import_parquet(
+        &self,
+        path: &std::path::Path,
+        table_name: &str,
+        _progress: Option<Box<dyn Fn(u64, u64) + Send + Sync>>,
+    ) -> anyhow::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let path_str = path.to_string_lossy();
+
+        let sql = format!(
+            "CREATE TABLE {} AS SELECT * FROM read_parquet('{}')",
+            table_name, path_str
+        );
+
+        conn.execute(&sql, []).context("Failed to import Parquet")?;
+        tracing::info!("Parquet imported to table: {}", table_name);
+        Ok(())
+    }
+
+    /// 导出到 CSV
+    pub fn export_csv(
+        &self,
+        path: &std::path::Path,
+        source: &str,
+        _progress: Option<Box<dyn Fn(u64, u64) + Send + Sync>>,
+    ) -> anyhow::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let path_str = path.to_string_lossy();
+
+        let sql = format!(
+            "COPY {} TO '{}' (FORMAT CSV, HEADER TRUE)",
+            source, path_str
+        );
+
+        conn.execute(&sql, []).context("Failed to export CSV")?;
+        tracing::info!("Data exported to CSV: {:?}", path);
+        Ok(())
+    }
+
+    /// 导出到 Parquet
+    pub fn export_parquet(
+        &self,
+        path: &std::path::Path,
+        source: &str,
+        _progress: Option<Box<dyn Fn(u64, u64) + Send + Sync>>,
+    ) -> anyhow::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let path_str = path.to_string_lossy();
+
+        let sql = format!(
+            "COPY {} TO '{}' (FORMAT PARQUET)",
+            source, path_str
+        );
+
+        conn.execute(&sql, []).context("Failed to export Parquet")?;
+        tracing::info!("Data exported to Parquet: {:?}", path);
+        Ok(())
+    }
+
     /// 执行 SQL 查询
     ///
     /// # 参数

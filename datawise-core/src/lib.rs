@@ -44,13 +44,19 @@
 
 pub mod executor;
 pub mod protocol;
+pub mod importer;
+pub mod exporter;
 
 pub use protocol::{Command, CmdType, EventKind, FileFmt, UiEvent};
+pub use importer::{Importer, ImportConfig};
+pub use exporter::{Exporter, ExportConfig};
 
 use anyhow::Result;
 use executor::Executor;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::broadcast;
+use dashmap::DashMap;
 
 /// DataWise 核心引擎
 pub struct DataWise {
@@ -58,6 +64,8 @@ pub struct DataWise {
     tx: broadcast::Sender<UiEvent>,
     /// SQL 执行器（使用 Arc 以支持跨线程共享）
     executor: Arc<Executor>,
+    /// 任务取消标记映射（task_id -> cancel_flag）
+    task_cancels: Arc<DashMap<u64, Arc<AtomicBool>>>,
 }
 
 impl DataWise {
@@ -67,10 +75,15 @@ impl DataWise {
     pub fn new() -> Result<Self> {
         let (tx, _) = broadcast::channel(100);
         let executor = Arc::new(Executor::new()?);
+        let task_cancels = Arc::new(DashMap::new());
 
         tracing::info!("DataWise initialized with DuckDB executor");
 
-        Ok(Self { tx, executor })
+        Ok(Self {
+            tx,
+            executor,
+            task_cancels,
+        })
     }
 
     /// 订阅 UI 事件
@@ -98,22 +111,23 @@ impl DataWise {
                 tracing::info!("Executing SQL: {}", sql);
                 self.execute_sql(cmd.task_id, &sql).await
             }
-            CmdType::ImportFile { path, fmt, table_name: _ } => {
+            CmdType::ImportFile { path, fmt, table_name } => {
                 tracing::info!("Importing file: {} ({:?})", path, fmt);
-                // TODO: 实现文件导入
-                Ok(())
+                self.import_file(cmd.task_id, &path, fmt, table_name).await
             }
-            CmdType::ExportFile { source: _, path, fmt } => {
+            CmdType::ExportFile { source, path, fmt } => {
                 tracing::info!("Exporting to: {} ({:?})", path, fmt);
-                // TODO: 实现文件导出
-                Ok(())
+                self.export_file(cmd.task_id, &source, &path, fmt).await
             }
             CmdType::Cancel { task_id } => {
                 tracing::info!("Cancelling task: {}", task_id);
-                // TODO: 实现任务取消
+                self.cancel_task(task_id);
                 Ok(())
             }
         };
+
+        // 清理任务取消标记
+        self.task_cancels.remove(&cmd.task_id);
 
         // 发送结果事件
         if let Err(ref e) = result {
@@ -149,6 +163,159 @@ impl DataWise {
         });
 
         Ok(())
+    }
+
+    /// 导入文件
+    async fn import_file(
+        &self,
+        task_id: u64,
+        path: &str,
+        fmt: protocol::FileFmt,
+        table_name: Option<String>,
+    ) -> Result<()> {
+        use std::path::Path;
+
+        let file_path = Path::new(path);
+        let table_name = table_name.unwrap_or_else(|| {
+            file_path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("imported_data")
+                .to_string()
+        });
+
+        // 创建取消标记
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+        self.task_cancels.insert(task_id, Arc::clone(&cancel_flag));
+
+        // 定义进度回调
+        let tx = self.tx.clone();
+        let progress_callback: Box<dyn Fn(u64, u64) + Send + Sync> = Box::new(move |processed, total| {
+            let pct = if total > 0 {
+                ((processed as f64 / total as f64) * 100.0) as u8
+            } else {
+                0
+            };
+            let _ = tx.send(UiEvent {
+                task_id,
+                kind: EventKind::Progress {
+                    pct,
+                    bytes_processed: processed,
+                    total_bytes: total,
+                    eta_seconds: None,
+                },
+            });
+        });
+
+        // 执行导入（直接使用 Executor 的连接）
+        match fmt {
+            protocol::FileFmt::Csv => {
+                self.executor.import_csv(
+                    file_path,
+                    &table_name,
+                    Some(progress_callback),
+                )?;
+            }
+            protocol::FileFmt::Parquet => {
+                self.executor.import_parquet(
+                    file_path,
+                    &table_name,
+                    Some(progress_callback),
+                )?;
+            }
+            protocol::FileFmt::Json => {
+                return Err(anyhow::anyhow!("JSON import not yet implemented"));
+            }
+        }
+
+        // 发送完成事件
+        let _ = self.tx.send(UiEvent {
+            task_id,
+            kind: EventKind::Finished {
+                row_count: 0,
+                column_count: 0,
+                preview: "{}".to_string(),
+            },
+        });
+
+        Ok(())
+    }
+
+    /// 导出文件
+    async fn export_file(
+        &self,
+        task_id: u64,
+        source: &str,
+        path: &str,
+        fmt: protocol::FileFmt,
+    ) -> Result<()> {
+        use std::path::Path;
+
+        let file_path = Path::new(path);
+
+        // 创建取消标记
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+        self.task_cancels.insert(task_id, Arc::clone(&cancel_flag));
+
+        // 定义进度回调
+        let tx = self.tx.clone();
+        let progress_callback: Box<dyn Fn(u64, u64) + Send + Sync> = Box::new(move |processed, total| {
+            let pct = if total > 0 {
+                ((processed as f64 / total as f64) * 100.0) as u8
+            } else {
+                0
+            };
+            let _ = tx.send(UiEvent {
+                task_id,
+                kind: EventKind::Progress {
+                    pct,
+                    bytes_processed: processed,
+                    total_bytes: total,
+                    eta_seconds: None,
+                },
+            });
+        });
+
+        // 执行导出（直接使用 Executor 的连接）
+        match fmt {
+            protocol::FileFmt::Csv => {
+                self.executor.export_csv(
+                    file_path,
+                    source,
+                    Some(progress_callback),
+                )?;
+            }
+            protocol::FileFmt::Parquet => {
+                self.executor.export_parquet(
+                    file_path,
+                    source,
+                    Some(progress_callback),
+                )?;
+            }
+            protocol::FileFmt::Json => {
+                return Err(anyhow::anyhow!("JSON export not yet implemented"));
+            }
+        }
+
+        // 发送完成事件
+        let _ = self.tx.send(UiEvent {
+            task_id,
+            kind: EventKind::Finished {
+                row_count: 0,
+                column_count: 0,
+                preview: "{}".to_string(),
+            },
+        });
+
+        Ok(())
+    }
+
+    /// 取消任务
+    fn cancel_task(&self, task_id: u64) {
+        if let Some((_, cancel_flag)) = self.task_cancels.remove(&task_id) {
+            cancel_flag.store(true, Ordering::SeqCst);
+            tracing::info!("Task {} cancelled", task_id);
+        }
     }
 
     /// 生成数据预览（JSON 格式）
