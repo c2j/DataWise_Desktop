@@ -317,4 +317,180 @@ mod tests {
         assert_eq!(event.task_id, 3);
         assert!(matches!(event.kind, EventKind::Error(_)));
     }
+
+    #[tokio::test]
+    async fn test_multiple_rows() {
+        let core = DataWise::new().unwrap();
+        let mut rx = core.subscribe();
+
+        let cmd = Command {
+            task_id: 4,
+            cmd_type: CmdType::ExecuteSql {
+                sql: "SELECT * FROM (VALUES (1), (2), (3), (4), (5)) AS t(id)".to_string(),
+            },
+        };
+
+        core.handle(cmd).await.unwrap();
+
+        // 跳过 Started 事件
+        let _ = rx.recv().await.unwrap();
+
+        // 检查 Finished 事件
+        let event = rx.recv().await.unwrap();
+        match event.kind {
+            EventKind::Finished {
+                row_count,
+                column_count,
+                preview,
+            } => {
+                assert_eq!(row_count, 5);
+                assert_eq!(column_count, 1);
+                assert!(preview.contains("1"));
+                assert!(preview.contains("5"));
+            }
+            _ => panic!("Expected Finished event"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_multiple_columns_and_types() {
+        let core = DataWise::new().unwrap();
+        let mut rx = core.subscribe();
+
+        let cmd = Command {
+            task_id: 5,
+            cmd_type: CmdType::ExecuteSql {
+                sql: "SELECT 42 as int_col, 3.14 as float_col, 'text' as str_col, true as bool_col".to_string(),
+            },
+        };
+
+        core.handle(cmd).await.unwrap();
+
+        // 跳过 Started 事件
+        let _ = rx.recv().await.unwrap();
+
+        // 检查 Finished 事件
+        let event = rx.recv().await.unwrap();
+        match event.kind {
+            EventKind::Finished {
+                row_count,
+                column_count,
+                preview,
+            } => {
+                assert_eq!(row_count, 1);
+                assert_eq!(column_count, 4);
+                assert!(preview.contains("42"));
+                assert!(preview.contains("3.14"));
+                assert!(preview.contains("text"));
+                assert!(preview.contains("true"));
+            }
+            _ => panic!("Expected Finished event"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_aggregation() {
+        let core = DataWise::new().unwrap();
+        let mut rx = core.subscribe();
+
+        let cmd = Command {
+            task_id: 6,
+            cmd_type: CmdType::ExecuteSql {
+                sql: "SELECT COUNT(*) as cnt, SUM(id) as total FROM (VALUES (1), (2), (3)) AS t(id)".to_string(),
+            },
+        };
+
+        core.handle(cmd).await.unwrap();
+
+        // 跳过 Started 事件
+        let _ = rx.recv().await.unwrap();
+
+        // 检查 Finished 事件
+        let event = rx.recv().await.unwrap();
+        match event.kind {
+            EventKind::Finished {
+                row_count,
+                column_count,
+                preview,
+            } => {
+                assert_eq!(row_count, 1);
+                assert_eq!(column_count, 2);
+                assert!(preview.contains("3")); // COUNT
+                assert!(preview.contains("6")); // SUM
+            }
+            _ => panic!("Expected Finished event"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_null_values() {
+        let core = DataWise::new().unwrap();
+        let mut rx = core.subscribe();
+
+        let cmd = Command {
+            task_id: 7,
+            cmd_type: CmdType::ExecuteSql {
+                sql: "SELECT 1 as id, NULL as nullable_col".to_string(),
+            },
+        };
+
+        core.handle(cmd).await.unwrap();
+
+        // 跳过 Started 事件
+        let _ = rx.recv().await.unwrap();
+
+        // 检查 Finished 事件
+        let event = rx.recv().await.unwrap();
+        match event.kind {
+            EventKind::Finished {
+                row_count,
+                column_count,
+                preview,
+            } => {
+                assert_eq!(row_count, 1);
+                assert_eq!(column_count, 2);
+                // JSON 中 null 值会被序列化为 null（不带引号）
+                let preview_json: Vec<serde_json::Value> = serde_json::from_str(&preview).unwrap();
+                assert_eq!(preview_json.len(), 1);
+                assert!(preview_json[0]["nullable_col"].is_null());
+            }
+            _ => panic!("Expected Finished event"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_preview_limit() {
+        let core = DataWise::new().unwrap();
+        let mut rx = core.subscribe();
+
+        // 生成 20 行数据，但预览应该只显示 10 行
+        let cmd = Command {
+            task_id: 8,
+            cmd_type: CmdType::ExecuteSql {
+                sql: "SELECT * FROM (SELECT * FROM (VALUES (1), (2), (3), (4), (5), (6), (7), (8), (9), (10), (11), (12), (13), (14), (15), (16), (17), (18), (19), (20)) AS t(id))".to_string(),
+            },
+        };
+
+        core.handle(cmd).await.unwrap();
+
+        // 跳过 Started 事件
+        let _ = rx.recv().await.unwrap();
+
+        // 检查 Finished 事件
+        let event = rx.recv().await.unwrap();
+        match event.kind {
+            EventKind::Finished {
+                row_count,
+                column_count,
+                preview,
+            } => {
+                assert_eq!(row_count, 20);
+                assert_eq!(column_count, 1);
+                // 预览应该包含前 10 行
+                let preview_json: Vec<serde_json::Value> = serde_json::from_str(&preview).unwrap();
+                assert_eq!(preview_json.len(), 10);
+            }
+            _ => panic!("Expected Finished event"),
+        }
+    }
 }

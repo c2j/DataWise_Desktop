@@ -27,4 +27,6 @@ serde_json = "1"
 datawise-core = { path = "../../datawise-core" }
 tokio = { workspace = true }
 anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = "0.3"
 
