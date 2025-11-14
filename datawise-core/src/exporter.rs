@@ -4,7 +4,6 @@
 
 use anyhow::{Context, Result};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tracing::info;
 
@@ -39,35 +38,11 @@ pub type ProgressCallback = Box<dyn Fn(u64, u64) + Send + Sync>;
 /// 文件导出器
 pub struct Exporter {
     conn: Arc<std::sync::Mutex<duckdb::Connection>>,
-    cancel_flag: Arc<AtomicBool>,
 }
 
 impl Exporter {
     pub fn new(conn: Arc<std::sync::Mutex<duckdb::Connection>>) -> Self {
-        Self {
-            conn,
-            cancel_flag: Arc::new(AtomicBool::new(false)),
-        }
-    }
-
-    /// 获取取消标记
-    pub fn cancel_flag(&self) -> Arc<AtomicBool> {
-        Arc::clone(&self.cancel_flag)
-    }
-
-    /// 设置取消标记
-    pub fn set_cancel(&self) {
-        self.cancel_flag.store(true, Ordering::SeqCst);
-    }
-
-    /// 重置取消标记
-    pub fn reset_cancel(&self) {
-        self.cancel_flag.store(false, Ordering::SeqCst);
-    }
-
-    /// 检查是否已取消
-    pub fn is_cancelled(&self) -> bool {
-        self.cancel_flag.load(Ordering::SeqCst)
+        Self { conn }
     }
 
     /// 导出到 CSV
@@ -78,7 +53,6 @@ impl Exporter {
         _progress: Option<ProgressCallback>,
     ) -> Result<()> {
         info!("Exporting to CSV: {:?}", path);
-        self.reset_cancel();
 
         let conn = self.conn.lock().unwrap();
         let path_str = path.to_string_lossy();
@@ -105,7 +79,6 @@ impl Exporter {
         _progress: Option<ProgressCallback>,
     ) -> Result<()> {
         info!("Exporting to Parquet: {:?}", path);
-        self.reset_cancel();
 
         let conn = self.conn.lock().unwrap();
         let path_str = path.to_string_lossy();

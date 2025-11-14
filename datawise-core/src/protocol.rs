@@ -74,6 +74,9 @@ pub enum CmdType {
         fmt: FileFmt,
         /// 导入到的表名（可选，默认使用文件名）
         table_name: Option<String>,
+        /// 是否覆盖现有表（默认 false）
+        #[serde(default)]
+        overwrite: bool,
     },
     
     /// 导出数据

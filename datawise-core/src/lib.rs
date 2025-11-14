@@ -64,6 +64,10 @@ pub struct DataWise {
     tx: broadcast::Sender<UiEvent>,
     /// SQL 执行器（使用 Arc 以支持跨线程共享）
     executor: Arc<Executor>,
+    /// 文件导入器
+    importer: Arc<Importer>,
+    /// 文件导出器
+    exporter: Arc<Exporter>,
     /// 任务取消标记映射（task_id -> cancel_flag）
     task_cancels: Arc<DashMap<u64, Arc<AtomicBool>>>,
 }
@@ -75,6 +79,8 @@ impl DataWise {
     pub fn new() -> Result<Self> {
         let (tx, _) = broadcast::channel(100);
         let executor = Arc::new(Executor::new()?);
+        let importer = Arc::new(Importer::new(executor.conn_arc()));
+        let exporter = Arc::new(Exporter::new(executor.conn_arc()));
         let task_cancels = Arc::new(DashMap::new());
 
         tracing::info!("DataWise initialized with DuckDB executor");
@@ -82,6 +88,8 @@ impl DataWise {
         Ok(Self {
             tx,
             executor,
+            importer,
+            exporter,
             task_cancels,
         })
     }
@@ -111,9 +119,9 @@ impl DataWise {
                 tracing::info!("Executing SQL: {}", sql);
                 self.execute_sql(cmd.task_id, &sql).await
             }
-            CmdType::ImportFile { path, fmt, table_name } => {
-                tracing::info!("Importing file: {} ({:?})", path, fmt);
-                self.import_file(cmd.task_id, &path, fmt, table_name).await
+            CmdType::ImportFile { path, fmt, table_name, overwrite } => {
+                tracing::info!("Importing file: {} ({:?}), overwrite: {}", path, fmt, overwrite);
+                self.import_file(cmd.task_id, &path, fmt, table_name, overwrite).await
             }
             CmdType::ExportFile { source, path, fmt } => {
                 tracing::info!("Exporting to: {} ({:?})", path, fmt);
@@ -172,6 +180,7 @@ impl DataWise {
         path: &str,
         fmt: protocol::FileFmt,
         table_name: Option<String>,
+        overwrite: bool,
     ) -> Result<()> {
         use std::path::Path;
 
@@ -207,36 +216,43 @@ impl DataWise {
             });
         });
 
-        // 执行导入（直接使用 Executor 的连接）
+        // 使用 Importer 执行导入
+        let import_config = ImportConfig {
+            table_name: table_name.clone(),
+            overwrite,
+        };
+
         match fmt {
             protocol::FileFmt::Csv => {
-                self.executor.import_csv(
+                self.importer.import_csv(
                     file_path,
-                    &table_name,
+                    import_config,
                     Some(progress_callback),
                 )?;
             }
             protocol::FileFmt::Parquet => {
-                self.executor.import_parquet(
+                self.importer.import_parquet(
                     file_path,
-                    &table_name,
+                    import_config,
                     Some(progress_callback),
                 )?;
             }
             protocol::FileFmt::Json => {
-                return Err(anyhow::anyhow!("JSON import not yet implemented"));
+                self.importer.import_json(
+                    file_path,
+                    import_config,
+                    Some(progress_callback),
+                )?;
             }
         }
 
-        // 查询导入的表以获取行数和列数
-        let count_sql = format!("SELECT COUNT(*) as cnt FROM {}", table_name);
-        let batches = self.executor.execute(&count_sql)?;
-        let row_count = batches.iter().map(|b| b.num_rows()).sum();
+        // 查询导入的表以获取行数、列数和预览数据
+        let preview_sql = format!("SELECT * FROM {} LIMIT 10", table_name);
+        let preview_batches = self.executor.execute(&preview_sql)?;
+        let preview = self.generate_preview(&preview_batches)?;
 
-        // 获取列数
-        let info_sql = format!("SELECT * FROM {} LIMIT 1", table_name);
-        let info_batches = self.executor.execute(&info_sql)?;
-        let column_count = info_batches.first().map(|b| b.num_columns()).unwrap_or(0);
+        let row_count = preview_batches.iter().map(|b| b.num_rows()).sum();
+        let column_count = preview_batches.first().map(|b| b.num_columns()).unwrap_or(0);
 
         // 发送完成事件
         let _ = self.tx.send(UiEvent {
@@ -244,7 +260,7 @@ impl DataWise {
             kind: EventKind::Finished {
                 row_count,
                 column_count,
-                preview: "{}".to_string(),
+                preview,
             },
         });
 

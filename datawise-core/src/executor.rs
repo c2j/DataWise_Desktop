@@ -13,9 +13,9 @@ use std::sync::{Arc, Mutex};
 
 /// SQL 执行器
 ///
-/// 使用 Mutex 包装 Connection 以支持跨线程共享
+/// 使用 Arc<Mutex<Connection>> 以支持跨线程共享
 pub struct Executor {
-    conn: Mutex<Connection>,
+    conn: Arc<Mutex<Connection>>,
 }
 
 impl Executor {
@@ -29,8 +29,13 @@ impl Executor {
         tracing::info!("DuckDB executor initialized");
 
         Ok(Self {
-            conn: Mutex::new(conn),
+            conn: Arc::new(Mutex::new(conn)),
         })
+    }
+
+    /// 获取连接的 Arc 引用
+    pub fn conn_arc(&self) -> Arc<Mutex<Connection>> {
+        Arc::clone(&self.conn)
     }
 
     /// 导入 CSV 文件

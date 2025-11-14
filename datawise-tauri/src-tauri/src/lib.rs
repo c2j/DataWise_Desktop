@@ -1,6 +1,7 @@
 use datawise_core::{DataWise, Command, CmdType, EventKind, FileFmt};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use tauri::Emitter;
 use tokio::sync::Mutex;
 
 /// SQL 查询结果的预览数据
@@ -16,6 +17,15 @@ pub struct QueryResult {
 pub struct OperationResult {
     pub success: bool,
     pub message: String,
+    /// 导入操作时的表名
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub table_name: Option<String>,
+    /// 导入操作时的行数
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub row_count: Option<usize>,
+    /// 导入操作时的列数
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub column_count: Option<usize>,
 }
 
 /// 应用状态，包含 DataWise Core 实例
@@ -90,14 +100,16 @@ async fn execute_sql(
 /// - `path`: 文件路径
 /// - `format`: 文件格式 ("csv" 或 "parquet")
 /// - `table_name`: 导入到的表名（可选）
+/// - `window`: Tauri 窗口（用于发送进度事件）
 ///
 /// # 返回
-/// 操作结果
+/// 操作结果（包含表名、行数、列数等信息）
 #[tauri::command]
 async fn import_file(
     path: String,
     format: String,
     table_name: Option<String>,
+    window: tauri::Window,
     state: tauri::State<'_, Arc<Mutex<AppState>>>,
 ) -> Result<OperationResult, String> {
     tracing::info!("Importing file: {} (format: {})", path, format);
@@ -117,7 +129,8 @@ async fn import_file(
         cmd_type: CmdType::ImportFile {
             path,
             fmt,
-            table_name,
+            table_name: table_name.clone(),
+            overwrite: false,
         },
     };
 
@@ -125,16 +138,51 @@ async fn import_file(
 
     // 等待事件
     let mut success = false;
+    let mut row_count = None;
+    let mut column_count = None;
+    let final_table_name = table_name;
+
     while let Ok(event) = rx.recv().await {
         match event.kind {
-            EventKind::Finished { .. } => {
+            EventKind::Started => {
+                tracing::info!("Import started");
+                let _ = window.emit("import-progress", serde_json::json!({
+                    "status": "started",
+                    "percentage": 0
+                }));
+            }
+            EventKind::Progress { pct, .. } => {
+                tracing::debug!("Import progress: {}%", pct);
+                let _ = window.emit("import-progress", serde_json::json!({
+                    "status": "in_progress",
+                    "percentage": pct
+                }));
+            }
+            EventKind::Finished {
+                row_count: rc,
+                column_count: cc,
+                ..
+            } => {
                 success = true;
+                row_count = Some(rc);
+                column_count = Some(cc);
+                let _ = window.emit("import-progress", serde_json::json!({
+                    "status": "completed",
+                    "percentage": 100
+                }));
                 break;
             }
             EventKind::Error(e) => {
+                let _ = window.emit("import-progress", serde_json::json!({
+                    "status": "error",
+                    "message": e.clone()
+                }));
                 return Ok(OperationResult {
                     success: false,
                     message: format!("Import error: {}", e),
+                    table_name: None,
+                    row_count: None,
+                    column_count: None,
                 });
             }
             _ => {}
@@ -144,10 +192,18 @@ async fn import_file(
     Ok(OperationResult {
         success,
         message: if success {
-            "File imported successfully".to_string()
+            format!(
+                "File imported successfully to table '{}' ({} rows, {} columns)",
+                final_table_name.as_ref().unwrap_or(&"imported_data".to_string()),
+                row_count.unwrap_or(0),
+                column_count.unwrap_or(0)
+            )
         } else {
             "Import failed".to_string()
         },
+        table_name: final_table_name,
+        row_count,
+        column_count,
     })
 }
 
@@ -202,6 +258,9 @@ async fn export_file(
                 return Ok(OperationResult {
                     success: false,
                     message: format!("Export error: {}", e),
+                    table_name: None,
+                    row_count: None,
+                    column_count: None,
                 });
             }
             _ => {}
@@ -215,6 +274,9 @@ async fn export_file(
         } else {
             "Export failed".to_string()
         },
+        table_name: None,
+        row_count: None,
+        column_count: None,
     })
 }
 
@@ -245,6 +307,9 @@ async fn cancel_task(
     Ok(OperationResult {
         success: true,
         message: "Task cancelled".to_string(),
+        table_name: None,
+        row_count: None,
+        column_count: None,
     })
 }
 

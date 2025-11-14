@@ -1,5 +1,6 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import "./App.css";
 
 interface QueryResult {
@@ -11,6 +12,9 @@ interface QueryResult {
 interface OperationResult {
   success: boolean;
   message: string;
+  table_name?: string;
+  row_count?: number;
+  column_count?: number;
 }
 
 type TabType = "query" | "import" | "export";
@@ -31,6 +35,13 @@ function App() {
   const [importLoading, setImportLoading] = useState(false);
   const [importError, setImportError] = useState<string | null>(null);
   const [importSuccess, setImportSuccess] = useState<string | null>(null);
+  const [importProgress, setImportProgress] = useState(0);
+  const [importProgressStatus, setImportProgressStatus] = useState<"idle" | "started" | "in_progress" | "completed" | "error">("idle");
+  const [lastImportedTable, setLastImportedTable] = useState<{
+    table_name: string;
+    row_count: number;
+    column_count: number;
+  } | null>(null);
 
   // Export tab state
   const [exportSource, setExportSource] = useState("");
@@ -39,6 +50,21 @@ function App() {
   const [exportLoading, setExportLoading] = useState(false);
   const [exportError, setExportError] = useState<string | null>(null);
   const [exportSuccess, setExportSuccess] = useState<string | null>(null);
+
+  // 监听导入进度事件
+  useEffect(() => {
+    const unlisten = listen<any>("import-progress", (event) => {
+      const payload = event.payload;
+      setImportProgressStatus(payload.status);
+      if (payload.percentage !== undefined) {
+        setImportProgress(payload.percentage);
+      }
+    });
+
+    return () => {
+      unlisten.then((fn) => fn());
+    };
+  }, []);
 
   async function executeSql() {
     setLoading(true);
@@ -59,6 +85,9 @@ function App() {
     setImportLoading(true);
     setImportError(null);
     setImportSuccess(null);
+    setLastImportedTable(null);
+    setImportProgress(0);
+    setImportProgressStatus("idle");
 
     try {
       const result: OperationResult = await invoke("import_file", {
@@ -71,6 +100,15 @@ function App() {
         setImportSuccess(result.message);
         setImportPath("");
         setImportTableName("");
+
+        // 保存导入的表信息
+        if (result.table_name && result.row_count !== undefined && result.column_count !== undefined) {
+          setLastImportedTable({
+            table_name: result.table_name,
+            row_count: result.row_count,
+            column_count: result.column_count,
+          });
+        }
       } else {
         setImportError(result.message);
       }
@@ -78,6 +116,14 @@ function App() {
       setImportError(String(err));
     } finally {
       setImportLoading(false);
+    }
+  }
+
+  function generateQueryFromImport() {
+    if (lastImportedTable) {
+      const query = `SELECT * FROM ${lastImportedTable.table_name} LIMIT 100`;
+      setSql(query);
+      setActiveTab("query");
     }
   }
 
@@ -248,6 +294,23 @@ function App() {
             {importLoading ? "Importing..." : "Import"}
           </button>
 
+          {importProgressStatus !== "idle" && (
+            <div className="progress-container">
+              <div className="progress-bar">
+                <div
+                  className="progress-fill"
+                  style={{ width: `${importProgress}%` }}
+                ></div>
+              </div>
+              <p className="progress-text">
+                {importProgressStatus === "started" && "Starting import..."}
+                {importProgressStatus === "in_progress" && `Importing... ${importProgress}%`}
+                {importProgressStatus === "completed" && "Import completed!"}
+                {importProgressStatus === "error" && "Import failed"}
+              </p>
+            </div>
+          )}
+
           {importError && (
             <div className="error-message">
               <strong>Error:</strong> {importError}
@@ -257,6 +320,22 @@ function App() {
           {importSuccess && (
             <div className="success-message">
               <strong>Success:</strong> {importSuccess}
+            </div>
+          )}
+
+          {lastImportedTable && (
+            <div className="import-result-info">
+              <h3>Import Summary</h3>
+              <p>
+                <strong>Table:</strong> {lastImportedTable.table_name}
+              </p>
+              <p>
+                <strong>Rows:</strong> {lastImportedTable.row_count} | <strong>Columns:</strong>{" "}
+                {lastImportedTable.column_count}
+              </p>
+              <button onClick={generateQueryFromImport} className="generate-query-btn">
+                Generate Query (SELECT * LIMIT 100)
+              </button>
             </div>
           )}
         </div>

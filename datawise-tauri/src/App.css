@@ -267,6 +267,83 @@ h2 {
   margin-top: 15px;
 }
 
+.import-result-info {
+  padding: 15px;
+  background-color: #e8f4f8;
+  border: 1px solid #b3d9e8;
+  border-radius: 4px;
+  margin-top: 15px;
+}
+
+.import-result-info h3 {
+  margin: 0 0 10px 0;
+  color: #0066cc;
+  font-size: 1em;
+}
+
+.import-result-info p {
+  margin: 5px 0;
+  color: #333;
+  font-size: 0.95em;
+}
+
+.generate-query-btn {
+  padding: 10px 15px;
+  background-color: #0066cc;
+  color: white;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  font-weight: 600;
+  transition: background-color 0.25s;
+  margin-top: 10px;
+  width: 100%;
+}
+
+.generate-query-btn:hover {
+  background-color: #0052a3;
+}
+
+.generate-query-btn:active {
+  background-color: #003d7a;
+}
+
+.progress-container {
+  margin-top: 15px;
+  padding: 15px;
+  background-color: #f0f8ff;
+  border: 1px solid #b3d9ff;
+  border-radius: 4px;
+}
+
+.progress-bar {
+  width: 100%;
+  height: 24px;
+  background-color: #e0e0e0;
+  border-radius: 4px;
+  overflow: hidden;
+  margin-bottom: 10px;
+}
+
+.progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #0066cc, #0052a3);
+  transition: width 0.3s ease;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: white;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.progress-text {
+  margin: 0;
+  font-size: 0.9em;
+  color: #0066cc;
+  text-align: center;
+}
+
 @media (prefers-color-scheme: dark) {
   :root {
     color: #f6f6f6;
@@ -383,5 +460,49 @@ h2 {
     background-color: #3a1a1a;
     border-color: #5a3a3a;
     color: #f88;
+  }
+
+  .import-result-info {
+    background-color: #1a3a4a;
+    border-color: #3a5a6a;
+    color: #a8d8e8;
+  }
+
+  .import-result-info h3 {
+    color: #24c8db;
+  }
+
+  .import-result-info p {
+    color: #a8d8e8;
+  }
+
+  .generate-query-btn {
+    background-color: #24c8db;
+    color: #1a1a1a;
+  }
+
+  .generate-query-btn:hover {
+    background-color: #1ab8cb;
+  }
+
+  .generate-query-btn:active {
+    background-color: #0fa8bb;
+  }
+
+  .progress-container {
+    background-color: #1a3a4a;
+    border-color: #3a5a6a;
+  }
+
+  .progress-bar {
+    background-color: #2a4a5a;
+  }
+
+  .progress-fill {
+    background: linear-gradient(90deg, #24c8db, #1ab8cb);
+  }
+
+  .progress-text {
+    color: #24c8db;
   }
 }
